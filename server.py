@@ -18,7 +18,7 @@ app = FastAPI()
 MODEL_PATH = os.getenv("VISION_MODEL", "yolov8n.pt")
 CAMERA_URL = os.getenv(
     "VISION_CAMERA_URL",
-    "http://192.168.68.127:8091/camera/latest.jpg",
+    "http://192.168.68.124:8091/camera/latest.jpg",
 )
 CONFIDENCE_THRESHOLD = float(
     os.getenv("VISION_CONFIDENCE", "0.40")
