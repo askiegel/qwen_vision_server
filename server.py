@@ -26,6 +26,13 @@ CONFIDENCE_THRESHOLD = float(
 POLL_INTERVAL = float(
     os.getenv("VISION_POLL_INTERVAL", "0.20")
 )
+TRACKER_CONFIG = os.getenv(
+    "VISION_TRACKER",
+    os.path.join(
+        os.path.dirname(__file__),
+        "botsort_reid.yaml",
+    ),
+)
 
 model = YOLO(MODEL_PATH)
 
@@ -46,7 +53,12 @@ def now_iso():
 
 def run_yolo(frame):
     height, width = frame.shape[:2]
-    results = model(frame, verbose=False)
+    results = model.track(
+        frame,
+        persist=True,
+        tracker=TRACKER_CONFIG,
+        verbose=False,
+    )
 
     detections = []
     labels = []
@@ -65,24 +77,28 @@ def run_yolo(frame):
             box_width = max(0, int(x2 - x1))
             box_height = max(0, int(y2 - y1))
 
-            detections.append(
-                {
-                    "label": label,
-                    "confidence": round(confidence, 3),
-                    "x1": int(x1),
-                    "y1": int(y1),
-                    "x2": int(x2),
-                    "y2": int(y2),
-                    "width": box_width,
-                    "height": box_height,
-                    "center_x": int((x1 + x2) / 2),
-                    "center_y": int((y1 + y2) / 2),
-                    "area": box_width * box_height,
-                    "image_width": width,
-                    "image_height": height,
-                }
-            )
+            detection = {
+                "label": label,
+                "confidence": round(confidence, 3),
+                "x1": int(x1),
+                "y1": int(y1),
+                "x2": int(x2),
+                "y2": int(y2),
+                "width": box_width,
+                "height": box_height,
+                "center_x": int((x1 + x2) / 2),
+                "center_y": int((y1 + y2) / 2),
+                "area": box_width * box_height,
+                "image_width": width,
+                "image_height": height,
+            }
 
+            if box.id is not None:
+                detection["track_id"] = int(
+                    box.id[0]
+                )
+
+            detections.append(detection)
             labels.append(label)
 
     unique_objects = sorted(set(labels))
