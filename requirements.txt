@@ -1,0 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+ultralytics==8.4.121
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+python-multipart==0.0.32
+requests==2.34.2
+lap==0.5.13
