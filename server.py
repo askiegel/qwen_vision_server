@@ -24,6 +24,9 @@ CAMERA_URL = os.getenv(
 CONFIDENCE_THRESHOLD = float(
     os.getenv("VISION_CONFIDENCE", "0.40")
 )
+CANDIDATE_CONFIDENCE = float(
+    os.getenv("VISION_CANDIDATE_CONFIDENCE", "0.05")
+)
 POLL_INTERVAL = float(
     os.getenv("VISION_POLL_INTERVAL", "0.20")
 )
@@ -36,6 +39,23 @@ TRACKER_CONFIG = os.getenv(
 )
 PERSON_MATCH_IOU_THRESHOLD = 0.50
 
+
+def _validate_confidence_configuration():
+    if not (
+        0.0 < CANDIDATE_CONFIDENCE
+        <= CONFIDENCE_THRESHOLD
+        <= 1.0
+    ):
+        raise ValueError(
+            "VISION_CANDIDATE_CONFIDENCE must satisfy "
+            "0.0 < candidate <= VISION_CONFIDENCE <= 1.0 "
+            f"(got candidate={CANDIDATE_CONFIDENCE!r}, "
+            f"publish={CONFIDENCE_THRESHOLD!r})."
+        )
+
+
+_validate_confidence_configuration()
+
 model = YOLO(MODEL_PATH)
 person_tracker_model = YOLO(MODEL_PATH)
 
@@ -43,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 latest_frame = None
 latest_detections = []
+latest_candidate_detections = []
 latest_description = "No frame processed yet."
 latest_timestamp = None
 camera_running = False
@@ -140,21 +161,25 @@ def _merge_person_track_ids(detections, tracker_results, width, height):
         used_trackers.add(tracker_index)
 
 
-def run_yolo(frame):
+def run_yolo(frame, return_candidates=False):
     height, width = frame.shape[:2]
-    general_results = model(frame, verbose=False)
+    general_results = model(
+        frame,
+        conf=CANDIDATE_CONFIDENCE,
+        verbose=False,
+    )
 
-    detections = []
-    labels = []
+    candidate_detections = []
+    candidate_confidences = []
 
     for result in general_results:
         for box in result.boxes:
             confidence = float(box.conf[0])
-            if confidence < CONFIDENCE_THRESHOLD:
+            if confidence < CANDIDATE_CONFIDENCE:
                 continue
             detection = _detection_from_box(result, box, width, height)
-            detections.append(detection)
-            labels.append(detection["label"])
+            candidate_detections.append(detection)
+            candidate_confidences.append(confidence)
 
     try:
         tracker_results = person_tracker_model.track(
@@ -164,10 +189,24 @@ def run_yolo(frame):
             tracker=TRACKER_CONFIG,
             verbose=False,
         )
-        _merge_person_track_ids(detections, tracker_results, width, height)
+        _merge_person_track_ids(
+            candidate_detections,
+            tracker_results,
+            width,
+            height,
+        )
     except Exception:
         logger.exception("Person tracking failed; retaining general detections.")
 
+    detections = [
+        detection
+        for detection, confidence in zip(
+            candidate_detections,
+            candidate_confidences,
+        )
+        if confidence >= CONFIDENCE_THRESHOLD
+    ]
+    labels = [detection["label"] for detection in detections]
     unique_objects = sorted(set(labels))
 
     if unique_objects:
@@ -175,12 +214,20 @@ def run_yolo(frame):
     else:
         description = "I do not recognize any common objects."
 
+    if return_candidates:
+        return (
+            detections,
+            unique_objects,
+            description,
+            candidate_detections,
+        )
     return detections, unique_objects, description
 
 
 def camera_loop():
     global latest_frame
     global latest_detections
+    global latest_candidate_detections
     global latest_description
     global latest_timestamp
     global camera_running
@@ -212,12 +259,18 @@ def camera_loop():
                     "Camera relay returned an invalid JPEG."
                 )
 
-            detections, objects, description = run_yolo(frame)
+            (
+                detections,
+                objects,
+                description,
+                candidate_detections,
+            ) = run_yolo(frame, return_candidates=True)
             timestamp = now_iso()
 
             with lock:
                 latest_frame = frame.copy()
                 latest_detections = detections
+                latest_candidate_detections = candidate_detections
                 latest_description = description
                 latest_timestamp = timestamp
                 camera_running = True
@@ -265,6 +318,7 @@ def root():
         "endpoints": [
             "/detect",
             "/detections/latest",
+            "/detections/target/latest",
             "/description",
             "/frame",
         ],
@@ -282,6 +336,36 @@ def detections_latest():
             "camera_url": CAMERA_URL,
             "last_error": last_error,
         }
+
+
+@app.get("/detections/target/latest")
+def detections_target_latest(label: str):
+    normalized_label = label.casefold()
+    with lock:
+        detections = [
+            dict(detection)
+            for detection in latest_candidate_detections
+            if str(detection.get("label", "")).casefold()
+            == normalized_label
+        ]
+        timestamp = latest_timestamp
+        running = camera_running
+        error = last_error
+
+    detections.sort(
+        key=lambda detection: detection.get("confidence", 0.0),
+        reverse=True,
+    )
+    return {
+        "timestamp": timestamp,
+        "label": label,
+        "found": bool(detections),
+        "best_detection": detections[0] if detections else None,
+        "detections": detections,
+        "camera_running": running,
+        "camera_url": CAMERA_URL,
+        "last_error": error,
+    }
 
 
 @app.get("/description")
