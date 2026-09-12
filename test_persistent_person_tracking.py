@@ -19,104 +19,113 @@ class FakeVector:
 
 
 class FakeBox:
-    def __init__(self, track_id):
-        self.cls = FakeVector([0])
-        self.conf = FakeVector([0.91])
-        self.xyxy = [
-            FakeVector([100, 80, 260, 430])
-        ]
-
-        self.id = (
-            FakeVector([track_id])
-            if track_id is not None
-            else None
-        )
+    def __init__(self, cls_id, confidence, coordinates, track_id=None):
+        self.cls = FakeVector([cls_id])
+        self.conf = FakeVector([confidence])
+        self.xyxy = [FakeVector(coordinates)]
+        self.id = FakeVector([track_id]) if track_id is not None else None
 
 
 class FakeResult:
-    names = {0: "person"}
+    names = {0: "person", 24: "backpack", 25: "umbrella", 56: "chair", 62: "tv"}
 
-    def __init__(self, track_id):
-        self.boxes = [FakeBox(track_id)]
+    def __init__(self, boxes):
+        self.boxes = boxes
 
 
 class FakeModel:
-    def __init__(self, track_id):
-        self.track_id = track_id
+    def __init__(self, results=None, error=None):
+        self.results = results or []
+        self.error = error
         self.track_calls = []
         self.predict_calls = []
 
     def __call__(self, frame, **kwargs):
         self.predict_calls.append(kwargs)
-        return [FakeResult(self.track_id)]
+        return self.results
 
     def track(self, frame, **kwargs):
         self.track_calls.append(kwargs)
-        return [FakeResult(self.track_id)]
+        if self.error is not None:
+            raise self.error
+        return self.results
+
+
+def run_with_models(general, tracker):
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    with patch.object(server, "model", general), patch.object(
+        server, "person_tracker_model", tracker
+    ):
+        return server.run_yolo(frame)
 
 
 def main():
-    frame = np.zeros(
-        (480, 640, 3),
-        dtype=np.uint8,
-    )
+    general = FakeModel([
+        FakeResult([
+            FakeBox(24, 0.91, [40, 40, 180, 200]),
+            FakeBox(56, 0.88, [200, 50, 350, 260]),
+            FakeBox(62, 0.82, [360, 60, 600, 250]),
+            FakeBox(0, 0.93, [100, 100, 300, 450]),
+        ])
+    ])
+    umbrella_tracker = FakeModel([
+        FakeResult([FakeBox(25, 0.99, [0, 0, 640, 480], track_id=7)])
+    ])
+    detections, labels, _ = run_with_models(general, umbrella_tracker)
+    assert {item["label"] for item in detections} == {"backpack", "chair", "tv", "person"}
+    assert "track_id" not in next(item for item in detections if item["label"] == "person")
+    assert umbrella_tracker.track_calls[0]["persist"] is True
+    assert umbrella_tracker.track_calls[0]["tracker"] == server.TRACKER_CONFIG
+    assert umbrella_tracker.track_calls[0]["classes"] == [0]
+    assert labels == ["backpack", "chair", "person", "tv"]
+    print("PASS: all general detections survive a non-person tracker result.")
 
-    tracked_model = FakeModel(track_id=42)
-
-    with patch.object(
-        server,
-        "model",
-        tracked_model,
-    ):
-        detections, _, _ = server.run_yolo(
-            frame
+    person_tracker = FakeModel([
+        FakeResult([FakeBox(0, 0.91, [100, 100, 300, 450], track_id=42)])
+    ])
+    detections, _, _ = run_with_models(general, person_tracker)
+    person = next(item for item in detections if item["label"] == "person")
+    assert person["track_id"] == 42
+    assert all(
+        field in person
+        for field in (
+            "label", "confidence", "x1", "y1", "x2", "y2",
+            "center_x", "area", "image_width", "image_height",
+            "track_id",
         )
-
-    assert tracked_model.track_calls, (
-        "run_yolo did not invoke model.track()."
     )
+    print("PASS: matched person receives a persistent track_id.")
 
-    assert not tracked_model.predict_calls, (
-        "run_yolo still invoked ordinary prediction."
+    second_detections, _, _ = run_with_models(general, person_tracker)
+    second_person = next(
+        item for item in second_detections if item["label"] == "person"
     )
+    assert second_person["track_id"] == person["track_id"]
+    assert len(person_tracker.track_calls) == 2
+    assert all(call["persist"] is True for call in person_tracker.track_calls)
+    print("PASS: sequential tracked frames preserve the person track_id.")
 
-    call = tracked_model.track_calls[0]
+    unmatched_tracker = FakeModel([
+        FakeResult([FakeBox(0, 0.91, [500, 100, 620, 300], track_id=99)])
+    ])
+    detections, _, _ = run_with_models(general, unmatched_tracker)
+    person = next(item for item in detections if item["label"] == "person")
+    assert "track_id" not in person
+    print("PASS: unmatched person remains valid without track_id.")
 
-    assert call.get("persist") is True, (
-        "ByteTrack state was not persisted across frames."
-    )
+    failing_tracker = FakeModel(error=RuntimeError("tracker unavailable"))
+    detections, _, _ = run_with_models(general, failing_tracker)
+    assert len(detections) == 4
+    assert {item["label"] for item in detections} == {"backpack", "chair", "tv", "person"}
+    print("PASS: tracker failure preserves general detections.")
 
-    assert call.get("tracker") == server.TRACKER_CONFIG, (
-        "run_yolo did not select the configured tracker."
-    )
-
-    assert detections[0]["track_id"] == 42, (
-        "Ultralytics track ID was not added to the detection."
-    )
-
-    print("PASS: run_yolo invokes persistent person tracking.")
-    print("PASS: tracked detection includes track_id.")
-
-    untracked_model = FakeModel(track_id=None)
-
-    with patch.object(
-        server,
-        "model",
-        untracked_model,
-    ):
-        detections, _, _ = server.run_yolo(
-            frame
-        )
-
-    assert "track_id" not in detections[0], (
-        "Detection without a tracker ID received an invalid track_id."
-    )
-
-    print(
-        "PASS: detections without tracker IDs remain valid."
-    )
-    print()
-    print("Persistent person-tracking test passed.")
+    no_id_tracker = FakeModel([
+        FakeResult([FakeBox(0, 0.91, [100, 100, 300, 450])])
+    ])
+    detections, _, _ = run_with_models(general, no_id_tracker)
+    assert "track_id" not in next(item for item in detections if item["label"] == "person")
+    print("PASS: detections without tracker IDs remain valid.")
+    print("\nPersistent person-tracking and multi-object test passed.")
 
 
 if __name__ == "__main__":

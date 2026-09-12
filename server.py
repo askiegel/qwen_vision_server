@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import logging
 import threading
 import time
 from datetime import datetime, timezone
@@ -33,8 +34,12 @@ TRACKER_CONFIG = os.getenv(
         "botsort_reid.yaml",
     ),
 )
+PERSON_MATCH_IOU_THRESHOLD = 0.50
 
 model = YOLO(MODEL_PATH)
+person_tracker_model = YOLO(MODEL_PATH)
+
+logger = logging.getLogger(__name__)
 
 latest_frame = None
 latest_detections = []
@@ -51,55 +56,117 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _detection_from_box(result, box, width, height):
+    cls_id = int(box.cls[0])
+    label = str(result.names[cls_id])
+    confidence = float(box.conf[0])
+    x1, y1, x2, y2 = box.xyxy[0].tolist()
+    box_width = max(0, int(x2 - x1))
+    box_height = max(0, int(y2 - y1))
+
+    return {
+        "label": label,
+        "confidence": round(confidence, 3),
+        "x1": int(x1),
+        "y1": int(y1),
+        "x2": int(x2),
+        "y2": int(y2),
+        "width": box_width,
+        "height": box_height,
+        "center_x": int((x1 + x2) / 2),
+        "center_y": int((y1 + y2) / 2),
+        "area": box_width * box_height,
+        "image_width": width,
+        "image_height": height,
+    }
+
+
+def _box_iou(left, right):
+    x1 = max(left["x1"], right["x1"])
+    y1 = max(left["y1"], right["y1"])
+    x2 = min(left["x2"], right["x2"])
+    y2 = min(left["y2"], right["y2"])
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    if not intersection:
+        return 0.0
+    union = left["area"] + right["area"] - intersection
+    return intersection / union if union else 0.0
+
+
+def _merge_person_track_ids(detections, tracker_results, width, height):
+    tracker_boxes = []
+    for result in tracker_results:
+        for box in result.boxes:
+            cls_id = int(box.cls[0])
+            if cls_id != 0 or box.id is None:
+                continue
+            tracked = _detection_from_box(
+                result,
+                box,
+                width,
+                height,
+            )
+            tracked["track_id"] = int(box.id[0])
+            tracker_boxes.append(tracked)
+
+    candidates = [
+        (index, detection)
+        for index, detection in enumerate(detections)
+        if detection["label"] == "person"
+    ]
+    matches = []
+    for detection_index, detection in candidates:
+        for tracker_index, tracked in enumerate(tracker_boxes):
+            matches.append(
+                (_box_iou(detection, tracked), detection_index, tracker_index)
+            )
+
+    used_detections = set()
+    used_trackers = set()
+    for iou, detection_index, tracker_index in sorted(
+        matches,
+        key=lambda item: (-item[0], item[1], item[2]),
+    ):
+        if (
+            iou < PERSON_MATCH_IOU_THRESHOLD
+            or detection_index in used_detections
+            or tracker_index in used_trackers
+        ):
+            continue
+        detections[detection_index]["track_id"] = tracker_boxes[tracker_index][
+            "track_id"
+        ]
+        used_detections.add(detection_index)
+        used_trackers.add(tracker_index)
+
+
 def run_yolo(frame):
     height, width = frame.shape[:2]
-    results = model.track(
-        frame,
-        persist=True,
-        tracker=TRACKER_CONFIG,
-        verbose=False,
-    )
+    general_results = model(frame, verbose=False)
 
     detections = []
     labels = []
 
-    for result in results:
+    for result in general_results:
         for box in result.boxes:
-            cls_id = int(box.cls[0])
-            label = str(result.names[cls_id])
             confidence = float(box.conf[0])
-
             if confidence < CONFIDENCE_THRESHOLD:
                 continue
-
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-
-            box_width = max(0, int(x2 - x1))
-            box_height = max(0, int(y2 - y1))
-
-            detection = {
-                "label": label,
-                "confidence": round(confidence, 3),
-                "x1": int(x1),
-                "y1": int(y1),
-                "x2": int(x2),
-                "y2": int(y2),
-                "width": box_width,
-                "height": box_height,
-                "center_x": int((x1 + x2) / 2),
-                "center_y": int((y1 + y2) / 2),
-                "area": box_width * box_height,
-                "image_width": width,
-                "image_height": height,
-            }
-
-            if box.id is not None:
-                detection["track_id"] = int(
-                    box.id[0]
-                )
-
+            detection = _detection_from_box(result, box, width, height)
             detections.append(detection)
-            labels.append(label)
+            labels.append(detection["label"])
+
+    try:
+        tracker_results = person_tracker_model.track(
+            frame,
+            classes=[0],
+            persist=True,
+            tracker=TRACKER_CONFIG,
+            verbose=False,
+        )
+        _merge_person_track_ids(detections, tracker_results, width, height)
+    except Exception:
+        logger.exception("Person tracking failed; retaining general detections.")
 
     unique_objects = sorted(set(labels))
 
