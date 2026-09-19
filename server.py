@@ -27,6 +27,9 @@ CONFIDENCE_THRESHOLD = float(
 CANDIDATE_CONFIDENCE = float(
     os.getenv("VISION_CANDIDATE_CONFIDENCE", "0.05")
 )
+PROPOSAL_CONFIDENCE = float(
+    os.getenv("VISION_PROPOSAL_CONFIDENCE", "0.02")
+)
 POLL_INTERVAL = float(
     os.getenv("VISION_POLL_INTERVAL", "0.20")
 )
@@ -52,6 +55,17 @@ def _validate_confidence_configuration():
             f"(got candidate={CANDIDATE_CONFIDENCE!r}, "
             f"publish={CONFIDENCE_THRESHOLD!r})."
         )
+    if not (
+        0.0 < PROPOSAL_CONFIDENCE
+        <= CONFIDENCE_THRESHOLD
+        <= 1.0
+    ):
+        raise ValueError(
+            "VISION_PROPOSAL_CONFIDENCE must satisfy "
+            "0.0 < proposal <= VISION_CONFIDENCE <= 1.0 "
+            f"(got proposal={PROPOSAL_CONFIDENCE!r}, "
+            f"publish={CONFIDENCE_THRESHOLD!r})."
+        )
 
 
 _validate_confidence_configuration()
@@ -64,6 +78,7 @@ logger = logging.getLogger(__name__)
 latest_frame = None
 latest_detections = []
 latest_candidate_detections = []
+latest_proposal_detections = []
 latest_description = "No frame processed yet."
 latest_timestamp = None
 camera_running = False
@@ -161,23 +176,30 @@ def _merge_person_track_ids(detections, tracker_results, width, height):
         used_trackers.add(tracker_index)
 
 
-def run_yolo(frame, return_candidates=False):
+def run_yolo(frame, return_candidates=False, return_proposals=False):
     height, width = frame.shape[:2]
     general_results = model(
         frame,
-        conf=CANDIDATE_CONFIDENCE,
+        conf=min(
+            PROPOSAL_CONFIDENCE,
+            CANDIDATE_CONFIDENCE,
+        ),
         verbose=False,
     )
 
+    proposal_detections = []
     candidate_detections = []
     candidate_confidences = []
 
     for result in general_results:
         for box in result.boxes:
             confidence = float(box.conf[0])
-            if confidence < CANDIDATE_CONFIDENCE:
+            if confidence < PROPOSAL_CONFIDENCE:
                 continue
             detection = _detection_from_box(result, box, width, height)
+            proposal_detections.append(detection)
+            if confidence < CANDIDATE_CONFIDENCE:
+                continue
             candidate_detections.append(detection)
             candidate_confidences.append(confidence)
 
@@ -215,6 +237,14 @@ def run_yolo(frame, return_candidates=False):
         description = "I do not recognize any common objects."
 
     if return_candidates:
+        if return_proposals:
+            return (
+                detections,
+                unique_objects,
+                description,
+                candidate_detections,
+                proposal_detections,
+            )
         return (
             detections,
             unique_objects,
@@ -228,6 +258,7 @@ def camera_loop():
     global latest_frame
     global latest_detections
     global latest_candidate_detections
+    global latest_proposal_detections
     global latest_description
     global latest_timestamp
     global camera_running
@@ -264,13 +295,19 @@ def camera_loop():
                 objects,
                 description,
                 candidate_detections,
-            ) = run_yolo(frame, return_candidates=True)
+                proposal_detections,
+            ) = run_yolo(
+                frame,
+                return_candidates=True,
+                return_proposals=True,
+            )
             timestamp = now_iso()
 
             with lock:
                 latest_frame = frame.copy()
                 latest_detections = detections
                 latest_candidate_detections = candidate_detections
+                latest_proposal_detections = proposal_detections
                 latest_description = description
                 latest_timestamp = timestamp
                 camera_running = True
@@ -365,6 +402,31 @@ def detections_target_latest(label: str):
         "camera_running": running,
         "camera_url": CAMERA_URL,
         "last_error": error,
+    }
+
+
+@app.get("/detections/candidates/latest")
+def detections_candidates_latest():
+    with lock:
+        detections = [
+            dict(detection)
+            for detection in latest_proposal_detections
+        ]
+        timestamp = latest_timestamp
+        running = camera_running
+        error = last_error
+        frame = latest_frame
+
+    image_height = int(frame.shape[0]) if frame is not None else None
+    image_width = int(frame.shape[1]) if frame is not None else None
+    return {
+        "timestamp": timestamp,
+        "detections": detections,
+        "camera_running": running,
+        "camera_url": CAMERA_URL,
+        "last_error": error,
+        "image_width": image_width,
+        "image_height": image_height,
     }
 
 

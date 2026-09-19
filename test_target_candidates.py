@@ -35,6 +35,7 @@ class Result:
         24: "backpack",
         25: "umbrella",
         56: "chair",
+        62: "toilet",
     }
 
     def __init__(self, boxes):
@@ -82,7 +83,7 @@ def main():
             return_candidates=True,
         )
 
-    assert general.calls[0]["conf"] == server.CANDIDATE_CONFIDENCE
+    assert general.calls[0]["conf"] == server.PROPOSAL_CONFIDENCE
     assert len(candidates) == 6
     assert {item["label"] for item in published} == {
         "umbrella", "chair", "person"
@@ -103,6 +104,42 @@ def main():
     assert response["best_detection"]["label"] == "backpack"
     assert response["best_detection"]["x1"] == 190
     print("PASS: backpack query returns only matching candidates, sorted.")
+
+    proposals_model = FakeModel([Result([
+        Box(56, 0.021, [381, 81, 534, 350]),
+        Box(62, 0.019, [100, 100, 200, 200]),
+    ])])
+    with patch.object(server, "model", proposals_model), patch.object(
+        server, "person_tracker_model", FakeModel()
+    ):
+        published, _, _, candidates, proposals = server.run_yolo(
+            frame, return_candidates=True, return_proposals=True,
+        )
+    assert proposals_model.calls[0]["conf"] == server.PROPOSAL_CONFIDENCE
+    assert [item["label"] for item in proposals] == ["chair"]
+    assert proposals[0]["confidence"] == 0.021
+    assert proposals[0]["x1"] == 381
+    assert proposals[0]["y2"] == 350
+    assert candidates == []
+    assert published == []
+    with server.lock:
+        server.latest_candidate_detections = candidates
+        server.latest_proposal_detections = proposals
+        server.latest_frame = frame
+        server.latest_timestamp = "proposal-time"
+        server.camera_running = True
+        server.last_error = None
+    proposal_response = server.detections_candidates_latest()
+    assert proposal_response["detections"] == proposals
+    assert proposal_response["image_width"] == 640
+    assert proposal_response["image_height"] == 480
+    assert set(proposal_response) == {
+        "timestamp", "detections", "camera_running", "camera_url",
+        "last_error", "image_width", "image_height",
+    }
+    chair_target_response = server.detections_target_latest("chair")
+    assert chair_target_response["found"] is False
+    print("PASS: class-agnostic proposal endpoint preserves low-confidence geometry.")
 
     below = FakeModel([Result([Box(24, 0.04, [0, 0, 10, 10])])])
     with patch.object(server, "model", below), patch.object(
@@ -125,6 +162,7 @@ def main():
 
     invalid_env = dict(os.environ)
     invalid_env["VISION_CANDIDATE_CONFIDENCE"] = "0.50"
+    invalid_env["VISION_PROPOSAL_CONFIDENCE"] = "0.50"
     invalid_env["VISION_CONFIDENCE"] = "0.40"
     result = subprocess.run(
         [sys.executable, "-c", "import server"],
@@ -135,6 +173,18 @@ def main():
     )
     assert result.returncode != 0
     assert "VISION_CANDIDATE_CONFIDENCE" in result.stderr
+
+    invalid_proposal_env = dict(os.environ)
+    invalid_proposal_env["VISION_PROPOSAL_CONFIDENCE"] = "0.0"
+    result = subprocess.run(
+        [sys.executable, "-c", "import server"],
+        cwd=os.path.dirname(__file__),
+        env=invalid_proposal_env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "VISION_PROPOSAL_CONFIDENCE" in result.stderr
     print("PASS: invalid candidate/publication configuration is rejected.")
 
     print("\nTarget-candidate test passed.")
