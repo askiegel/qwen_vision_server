@@ -212,7 +212,7 @@ def run_yolo(frame, return_candidates=False, return_proposals=False):
             verbose=False,
         )
         _merge_person_track_ids(
-            candidate_detections,
+            proposal_detections,
             tracker_results,
             width,
             height,

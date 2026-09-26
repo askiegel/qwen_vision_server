@@ -56,7 +56,11 @@ def run_with_models(general, tracker):
     with patch.object(server, "model", general), patch.object(
         server, "person_tracker_model", tracker
     ):
-        return server.run_yolo(frame)
+        return server.run_yolo(
+            frame,
+            return_candidates=True,
+            return_proposals=True,
+        )
 
 
 def main():
@@ -71,7 +75,9 @@ def main():
     umbrella_tracker = FakeModel([
         FakeResult([FakeBox(25, 0.99, [0, 0, 640, 480], track_id=7)])
     ])
-    detections, labels, _ = run_with_models(general, umbrella_tracker)
+    detections, labels, _, _candidates, _proposals = run_with_models(
+        general, umbrella_tracker,
+    )
     assert {item["label"] for item in detections} == {"backpack", "chair", "tv", "person"}
     assert "track_id" not in next(item for item in detections if item["label"] == "person")
     assert umbrella_tracker.track_calls[0]["persist"] is True
@@ -83,7 +89,9 @@ def main():
     person_tracker = FakeModel([
         FakeResult([FakeBox(0, 0.91, [100, 100, 300, 450], track_id=42)])
     ])
-    detections, _, _ = run_with_models(general, person_tracker)
+    detections, _, _, _candidates, _proposals = run_with_models(
+        general, person_tracker,
+    )
     person = next(item for item in detections if item["label"] == "person")
     assert person["track_id"] == 42
     assert all(
@@ -96,7 +104,9 @@ def main():
     )
     print("PASS: matched person receives a persistent track_id.")
 
-    second_detections, _, _ = run_with_models(general, person_tracker)
+    second_detections, _, _, _candidates, _proposals = run_with_models(
+        general, person_tracker,
+    )
     second_person = next(
         item for item in second_detections if item["label"] == "person"
     )
@@ -108,13 +118,17 @@ def main():
     unmatched_tracker = FakeModel([
         FakeResult([FakeBox(0, 0.91, [500, 100, 620, 300], track_id=99)])
     ])
-    detections, _, _ = run_with_models(general, unmatched_tracker)
+    detections, _, _, _candidates, _proposals = run_with_models(
+        general, unmatched_tracker,
+    )
     person = next(item for item in detections if item["label"] == "person")
     assert "track_id" not in person
     print("PASS: unmatched person remains valid without track_id.")
 
     failing_tracker = FakeModel(error=RuntimeError("tracker unavailable"))
-    detections, _, _ = run_with_models(general, failing_tracker)
+    detections, _, _, _candidates, _proposals = run_with_models(
+        general, failing_tracker,
+    )
     assert len(detections) == 4
     assert {item["label"] for item in detections} == {"backpack", "chair", "tv", "person"}
     print("PASS: tracker failure preserves general detections.")
@@ -122,9 +136,38 @@ def main():
     no_id_tracker = FakeModel([
         FakeResult([FakeBox(0, 0.91, [100, 100, 300, 450])])
     ])
-    detections, _, _ = run_with_models(general, no_id_tracker)
+    detections, _, _, _candidates, _proposals = run_with_models(
+        general, no_id_tracker,
+    )
     assert "track_id" not in next(item for item in detections if item["label"] == "person")
     print("PASS: detections without tracker IDs remain valid.")
+
+    low_confidence_person = FakeModel([
+        FakeResult([FakeBox(0, 0.03, [100, 100, 300, 450])])
+    ])
+    low_confidence_tracker = FakeModel([
+        FakeResult([FakeBox(0, 0.91, [100, 100, 300, 450], track_id=73)])
+    ])
+    _detections, _, _, candidates, proposals = run_with_models(
+        low_confidence_person, low_confidence_tracker,
+    )
+    assert candidates == []
+    assert len(proposals) == 1
+    assert proposals[0]["label"] == "person"
+    assert proposals[0]["confidence"] == 0.03
+    assert proposals[0]["track_id"] == 73
+    print("PASS: low-confidence proposals preserve existing tracker IDs.")
+
+    no_id_proposal_tracker = FakeModel([
+        FakeResult([FakeBox(0, 0.91, [100, 100, 300, 450])])
+    ])
+    _detections, _, _, candidates, proposals = run_with_models(
+        low_confidence_person, no_id_proposal_tracker,
+    )
+    assert candidates == []
+    assert len(proposals) == 1
+    assert "track_id" not in proposals[0]
+    print("PASS: proposal tracker IDs are never fabricated.")
     print("\nPersistent person-tracking and multi-object test passed.")
 
 
