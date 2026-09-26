@@ -40,6 +40,17 @@ TRACKER_CONFIG = os.getenv(
         "botsort_reid.yaml",
     ),
 )
+MARVIN_CONTINUITY_TRACKER_CONFIG = os.getenv(
+    "MARVIN_CONTINUITY_TRACKER",
+    os.path.join(
+        os.path.dirname(__file__),
+        "marvin_continuity_botsort.yaml",
+    ),
+)
+MARVIN_CONTINUITY_TRACK_CONF = float(
+    os.getenv("MARVIN_CONTINUITY_TRACK_CONF", str(PROPOSAL_CONFIDENCE))
+)
+MARVIN_CONTINUITY_TRACKER_SOURCE = "marvin_continuity_botsort"
 PERSON_MATCH_IOU_THRESHOLD = 0.50
 
 
@@ -66,12 +77,20 @@ def _validate_confidence_configuration():
             f"(got proposal={PROPOSAL_CONFIDENCE!r}, "
             f"publish={CONFIDENCE_THRESHOLD!r})."
         )
+    if not 0.0 < MARVIN_CONTINUITY_TRACK_CONF <= PROPOSAL_CONFIDENCE:
+        raise ValueError(
+            "MARVIN_CONTINUITY_TRACK_CONF must satisfy "
+            "0.0 < continuity <= VISION_PROPOSAL_CONFIDENCE "
+            f"(got continuity={MARVIN_CONTINUITY_TRACK_CONF!r}, "
+            f"proposal={PROPOSAL_CONFIDENCE!r})."
+        )
 
 
 _validate_confidence_configuration()
 
 model = YOLO(MODEL_PATH)
 person_tracker_model = YOLO(MODEL_PATH)
+marvin_continuity_tracker_model = YOLO(MODEL_PATH)
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +148,14 @@ def _box_iou(left, right):
     return intersection / union if union else 0.0
 
 
-def _merge_person_track_ids(detections, tracker_results, width, height):
+def _merge_person_track_ids(
+    detections,
+    tracker_results,
+    width,
+    height,
+    *,
+    continuity_source=None,
+):
     tracker_boxes = []
     for result in tracker_results:
         for box in result.boxes:
@@ -169,9 +195,14 @@ def _merge_person_track_ids(detections, tracker_results, width, height):
             or tracker_index in used_trackers
         ):
             continue
-        detections[detection_index]["track_id"] = tracker_boxes[tracker_index][
-            "track_id"
-        ]
+        tracker_id = tracker_boxes[tracker_index]["track_id"]
+        if continuity_source is None:
+            detections[detection_index]["track_id"] = tracker_id
+        else:
+            detections[detection_index]["marvin_continuity"] = {
+                "tracker_id": tracker_id,
+                "tracker_source": continuity_source,
+            }
         used_detections.add(detection_index)
         used_trackers.add(tracker_index)
 
@@ -219,6 +250,27 @@ def run_yolo(frame, return_candidates=False, return_proposals=False):
         )
     except Exception:
         logger.exception("Person tracking failed; retaining general detections.")
+
+    try:
+        continuity_results = marvin_continuity_tracker_model.track(
+            frame,
+            classes=[0],
+            conf=MARVIN_CONTINUITY_TRACK_CONF,
+            persist=True,
+            tracker=MARVIN_CONTINUITY_TRACKER_CONFIG,
+            verbose=False,
+        )
+        _merge_person_track_ids(
+            proposal_detections,
+            continuity_results,
+            width,
+            height,
+            continuity_source=MARVIN_CONTINUITY_TRACKER_SOURCE,
+        )
+    except Exception:
+        logger.exception(
+            "Marvin continuity tracking failed; retaining proposal detections."
+        )
 
     detections = [
         detection

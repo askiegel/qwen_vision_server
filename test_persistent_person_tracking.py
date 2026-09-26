@@ -51,10 +51,13 @@ class FakeModel:
         return self.results
 
 
-def run_with_models(general, tracker):
+def run_with_models(general, tracker, continuity_tracker=None):
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    continuity_tracker = continuity_tracker or FakeModel([])
     with patch.object(server, "model", general), patch.object(
         server, "person_tracker_model", tracker
+    ), patch.object(
+        server, "marvin_continuity_tracker_model", continuity_tracker
     ):
         return server.run_yolo(
             frame,
@@ -168,6 +171,48 @@ def main():
     assert len(proposals) == 1
     assert "track_id" not in proposals[0]
     print("PASS: proposal tracker IDs are never fabricated.")
+
+    continuity_tracker = FakeModel([
+        FakeResult([FakeBox(0, 0.03, [100, 100, 300, 450], track_id=84)])
+    ])
+    _detections, _, _, candidates, proposals = run_with_models(
+        low_confidence_person,
+        FakeModel([]),
+        continuity_tracker,
+    )
+    assert candidates == []
+    assert proposals[0]["marvin_continuity"] == {
+        "tracker_id": 84,
+        "tracker_source": "marvin_continuity_botsort",
+    }
+    assert not {"identity_id", "entity_id", "target_lock"} & set(proposals[0])
+    assert continuity_tracker.track_calls[0]["conf"] == server.MARVIN_CONTINUITY_TRACK_CONF
+    assert continuity_tracker.track_calls[0]["tracker"] == server.MARVIN_CONTINUITY_TRACKER_CONFIG
+    print("PASS: diagnostic continuity metadata is isolated from identity.")
+
+    no_id_continuity_tracker = FakeModel([
+        FakeResult([FakeBox(0, 0.03, [100, 100, 300, 450])])
+    ])
+    _detections, _, _, candidates, proposals = run_with_models(
+        low_confidence_person,
+        FakeModel([]),
+        no_id_continuity_tracker,
+    )
+    assert candidates == []
+    assert "marvin_continuity" not in proposals[0]
+    print("PASS: missing continuity tracker IDs fail closed.")
+
+    unmatched_continuity_tracker = FakeModel([
+        FakeResult([FakeBox(0, 0.03, [400, 100, 600, 450], track_id=85)])
+    ])
+    _detections, _, _, candidates, proposals = run_with_models(
+        low_confidence_person,
+        FakeModel([]),
+        unmatched_continuity_tracker,
+    )
+    assert candidates == []
+    assert "marvin_continuity" not in proposals[0]
+    print("PASS: unmatched continuity tracker metadata fails closed.")
     print("\nPersistent person-tracking and multi-object test passed.")
 
 
