@@ -27,7 +27,10 @@ class FakeBox:
 
 
 class FakeResult:
-    names = {0: "person", 24: "backpack", 25: "umbrella", 56: "chair", 62: "tv"}
+    names = {
+        0: "person", 24: "backpack", 25: "umbrella", 56: "chair",
+        62: "tv", 77: "teddy bear",
+    }
 
     def __init__(self, boxes):
         self.boxes = boxes
@@ -186,9 +189,69 @@ def main():
         "tracker_source": "marvin_continuity_botsort",
     }
     assert not {"identity_id", "entity_id", "target_lock"} & set(proposals[0])
-    assert continuity_tracker.track_calls[0]["conf"] == server.MARVIN_CONTINUITY_TRACK_CONF
+    assert continuity_tracker.track_calls[0]["conf"] == server.PROPOSAL_CONFIDENCE
     assert continuity_tracker.track_calls[0]["tracker"] == server.MARVIN_CONTINUITY_TRACKER_CONFIG
+    assert "classes" not in continuity_tracker.track_calls[0]
     print("PASS: diagnostic continuity metadata is isolated from identity.")
+
+    low_confidence_teddy_bear = FakeModel([
+        FakeResult([FakeBox(77, 0.03, [100, 100, 300, 450])])
+    ])
+    teddy_continuity_tracker = FakeModel([
+        FakeResult([FakeBox(77, 0.03, [100, 100, 300, 450], track_id=86)])
+    ])
+    _detections, _, _, candidates, proposals = run_with_models(
+        low_confidence_teddy_bear,
+        FakeModel([]),
+        teddy_continuity_tracker,
+    )
+    assert candidates == []
+    assert proposals[0]["label"] == "teddy bear"
+    assert proposals[0]["marvin_continuity"] == {
+        "tracker_id": 86,
+        "tracker_source": "marvin_continuity_botsort",
+    }
+    assert not {
+        "identity_id", "entity_id", "target_lock", "world_model",
+        "controller", "execution",
+    } & set(proposals[0])
+    print("PASS: teddy bear proposals receive diagnostic continuity metadata.")
+
+    mixed_low_confidence = FakeModel([
+        FakeResult([
+            FakeBox(0, 0.03, [100, 100, 300, 450]),
+            FakeBox(77, 0.03, [320, 100, 520, 450]),
+        ])
+    ])
+    mixed_continuity_tracker = FakeModel([
+        FakeResult([
+            FakeBox(0, 0.03, [100, 100, 300, 450], track_id=87),
+            FakeBox(77, 0.03, [320, 100, 520, 450], track_id=88),
+        ])
+    ])
+    _detections, _, _, candidates, proposals = run_with_models(
+        mixed_low_confidence,
+        FakeModel([]),
+        mixed_continuity_tracker,
+    )
+    assert candidates == []
+    assert {
+        proposal["label"]: proposal["marvin_continuity"]["tracker_id"]
+        for proposal in proposals
+    } == {"person": 87, "teddy bear": 88}
+    print("PASS: different proposal classes retain independent continuity IDs.")
+
+    overlapping_cross_label_tracker = FakeModel([
+        FakeResult([FakeBox(0, 0.03, [100, 100, 300, 450], track_id=89)])
+    ])
+    _detections, _, _, candidates, proposals = run_with_models(
+        low_confidence_teddy_bear,
+        FakeModel([]),
+        overlapping_cross_label_tracker,
+    )
+    assert candidates == []
+    assert "marvin_continuity" not in proposals[0]
+    print("PASS: overlapping cross-label boxes do not receive continuity metadata.")
 
     no_id_continuity_tracker = FakeModel([
         FakeResult([FakeBox(0, 0.03, [100, 100, 300, 450])])

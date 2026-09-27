@@ -47,11 +47,9 @@ MARVIN_CONTINUITY_TRACKER_CONFIG = os.getenv(
         "marvin_continuity_botsort.yaml",
     ),
 )
-MARVIN_CONTINUITY_TRACK_CONF = float(
-    os.getenv("MARVIN_CONTINUITY_TRACK_CONF", str(PROPOSAL_CONFIDENCE))
-)
 MARVIN_CONTINUITY_TRACKER_SOURCE = "marvin_continuity_botsort"
 PERSON_MATCH_IOU_THRESHOLD = 0.50
+CONTINUITY_MATCH_IOU_THRESHOLD = 0.50
 
 
 def _validate_confidence_configuration():
@@ -77,15 +75,6 @@ def _validate_confidence_configuration():
             f"(got proposal={PROPOSAL_CONFIDENCE!r}, "
             f"publish={CONFIDENCE_THRESHOLD!r})."
         )
-    if not 0.0 < MARVIN_CONTINUITY_TRACK_CONF <= PROPOSAL_CONFIDENCE:
-        raise ValueError(
-            "MARVIN_CONTINUITY_TRACK_CONF must satisfy "
-            "0.0 < continuity <= VISION_PROPOSAL_CONFIDENCE "
-            f"(got continuity={MARVIN_CONTINUITY_TRACK_CONF!r}, "
-            f"proposal={PROPOSAL_CONFIDENCE!r})."
-        )
-
-
 _validate_confidence_configuration()
 
 model = YOLO(MODEL_PATH)
@@ -207,6 +196,65 @@ def _merge_person_track_ids(
         used_trackers.add(tracker_index)
 
 
+def _normalized_tracker_label(value):
+    """Normalize labels only for diagnostic tracker association."""
+    return " ".join(str(value or "").casefold().split())
+
+
+def _merge_continuity_track_ids(
+    detections,
+    tracker_results,
+    width,
+    height,
+    *,
+    continuity_source,
+):
+    """Attach real diagnostic tracker IDs to same-label proposal boxes only.
+
+    This helper is deliberately independent from the normal person tracker.
+    It neither changes proposal geometry nor creates identity information.
+    """
+    tracker_boxes = []
+    for result in tracker_results:
+        for box in result.boxes:
+            if box.id is None:
+                continue
+            tracked = _detection_from_box(result, box, width, height)
+            tracked["track_id"] = int(box.id[0])
+            tracker_boxes.append(tracked)
+
+    matches = []
+    for detection_index, detection in enumerate(detections):
+        detection_label = _normalized_tracker_label(detection.get("label"))
+        if not detection_label:
+            continue
+        for tracker_index, tracked in enumerate(tracker_boxes):
+            if _normalized_tracker_label(tracked.get("label")) != detection_label:
+                continue
+            matches.append(
+                (_box_iou(detection, tracked), detection_index, tracker_index)
+            )
+
+    used_detections = set()
+    used_trackers = set()
+    for iou, detection_index, tracker_index in sorted(
+        matches,
+        key=lambda item: (-item[0], item[1], item[2]),
+    ):
+        if (
+            iou < CONTINUITY_MATCH_IOU_THRESHOLD
+            or detection_index in used_detections
+            or tracker_index in used_trackers
+        ):
+            continue
+        detections[detection_index]["marvin_continuity"] = {
+            "tracker_id": tracker_boxes[tracker_index]["track_id"],
+            "tracker_source": continuity_source,
+        }
+        used_detections.add(detection_index)
+        used_trackers.add(tracker_index)
+
+
 def run_yolo(frame, return_candidates=False, return_proposals=False):
     height, width = frame.shape[:2]
     general_results = model(
@@ -254,13 +302,12 @@ def run_yolo(frame, return_candidates=False, return_proposals=False):
     try:
         continuity_results = marvin_continuity_tracker_model.track(
             frame,
-            classes=[0],
-            conf=MARVIN_CONTINUITY_TRACK_CONF,
+            conf=PROPOSAL_CONFIDENCE,
             persist=True,
             tracker=MARVIN_CONTINUITY_TRACKER_CONFIG,
             verbose=False,
         )
-        _merge_person_track_ids(
+        _merge_continuity_track_ids(
             proposal_detections,
             continuity_results,
             width,
