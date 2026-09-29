@@ -4,6 +4,7 @@ import os
 import logging
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
 import cv2
@@ -50,6 +51,16 @@ MARVIN_CONTINUITY_TRACKER_CONFIG = os.getenv(
 MARVIN_CONTINUITY_TRACKER_SOURCE = "marvin_continuity_botsort"
 PERSON_MATCH_IOU_THRESHOLD = 0.50
 CONTINUITY_MATCH_IOU_THRESHOLD = 0.50
+
+
+def _new_marvin_continuity_generation():
+    """Create an opaque lifetime token for the dedicated continuity tracker."""
+    return uuid.uuid4().hex
+
+
+# This is deliberately independent of numeric tracker IDs and object geometry.
+# A new Vision Server process creates a new dedicated-tracker generation.
+MARVIN_CONTINUITY_TRACKER_GENERATION = _new_marvin_continuity_generation()
 
 
 def _validate_confidence_configuration():
@@ -250,6 +261,7 @@ def _merge_continuity_track_ids(
         detections[detection_index]["marvin_continuity"] = {
             "tracker_id": tracker_boxes[tracker_index]["track_id"],
             "tracker_source": continuity_source,
+            "tracker_generation": MARVIN_CONTINUITY_TRACKER_GENERATION,
         }
         used_detections.add(detection_index)
         used_trackers.add(tracker_index)

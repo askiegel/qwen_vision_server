@@ -69,6 +69,14 @@ def run_with_models(general, tracker, continuity_tracker=None):
         )
 
 
+def continuity_metadata(tracker_id):
+    return {
+        "tracker_id": tracker_id,
+        "tracker_source": "marvin_continuity_botsort",
+        "tracker_generation": server.MARVIN_CONTINUITY_TRACKER_GENERATION,
+    }
+
+
 def main():
     general = FakeModel([
         FakeResult([
@@ -184,14 +192,17 @@ def main():
         continuity_tracker,
     )
     assert candidates == []
-    assert proposals[0]["marvin_continuity"] == {
-        "tracker_id": 84,
-        "tracker_source": "marvin_continuity_botsort",
-    }
+    assert proposals[0]["marvin_continuity"] == continuity_metadata(84)
     assert not {"identity_id", "entity_id", "target_lock"} & set(proposals[0])
     assert continuity_tracker.track_calls[0]["conf"] == server.PROPOSAL_CONFIDENCE
     assert continuity_tracker.track_calls[0]["tracker"] == server.MARVIN_CONTINUITY_TRACKER_CONFIG
     assert "classes" not in continuity_tracker.track_calls[0]
+    _detections, _, _, _, next_proposals = run_with_models(
+        low_confidence_person,
+        FakeModel([]),
+        continuity_tracker,
+    )
+    assert next_proposals[0]["marvin_continuity"] == continuity_metadata(84)
     print("PASS: diagnostic continuity metadata is isolated from identity.")
 
     low_confidence_teddy_bear = FakeModel([
@@ -207,10 +218,7 @@ def main():
     )
     assert candidates == []
     assert proposals[0]["label"] == "teddy bear"
-    assert proposals[0]["marvin_continuity"] == {
-        "tracker_id": 86,
-        "tracker_source": "marvin_continuity_botsort",
-    }
+    assert proposals[0]["marvin_continuity"] == continuity_metadata(86)
     assert not {
         "identity_id", "entity_id", "target_lock", "world_model",
         "controller", "execution",
@@ -239,6 +247,10 @@ def main():
         proposal["label"]: proposal["marvin_continuity"]["tracker_id"]
         for proposal in proposals
     } == {"person": 87, "teddy bear": 88}
+    assert {
+        proposal["marvin_continuity"]["tracker_generation"]
+        for proposal in proposals
+    } == {server.MARVIN_CONTINUITY_TRACKER_GENERATION}
     print("PASS: different proposal classes retain independent continuity IDs.")
 
     overlapping_cross_label_tracker = FakeModel([
@@ -276,6 +288,13 @@ def main():
     assert candidates == []
     assert "marvin_continuity" not in proposals[0]
     print("PASS: unmatched continuity tracker metadata fails closed.")
+
+    first_generation = server._new_marvin_continuity_generation()
+    second_generation = server._new_marvin_continuity_generation()
+    assert isinstance(first_generation, str) and first_generation
+    assert isinstance(second_generation, str) and second_generation
+    assert first_generation != second_generation
+    print("PASS: new continuity tracker generations are opaque and distinct.")
     print("\nPersistent person-tracking and multi-object test passed.")
 
 
