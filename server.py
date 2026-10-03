@@ -100,6 +100,7 @@ latest_candidate_detections = []
 latest_proposal_detections = []
 latest_description = "No frame processed yet."
 latest_timestamp = None
+latest_source_frame_stamp_ns = None
 camera_running = False
 last_error = None
 
@@ -109,6 +110,52 @@ shutdown_event = threading.Event()
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def source_frame_stamp_ns_from_headers(headers):
+    """Parse the ROS source stamp paired with one camera JPEG response."""
+    if not hasattr(headers, "get"):
+        return None
+    try:
+        sec = int(headers.get("X-Mayday-Source-Stamp-Sec"))
+        nanosec = int(headers.get("X-Mayday-Source-Stamp-Nanosec"))
+    except (TypeError, ValueError):
+        return None
+    if sec < 0 or not 0 <= nanosec < 1_000_000_000:
+        return None
+    return sec * 1_000_000_000 + nanosec
+
+
+def _publish_inference_result(
+    frame,
+    detections,
+    candidate_detections,
+    proposal_detections,
+    description,
+    inference_timestamp,
+    source_frame_stamp_ns,
+):
+    """Publish one inference and its exact source-frame identity atomically."""
+    global latest_frame
+    global latest_detections
+    global latest_candidate_detections
+    global latest_proposal_detections
+    global latest_description
+    global latest_timestamp
+    global latest_source_frame_stamp_ns
+    global camera_running
+    global last_error
+
+    with lock:
+        latest_frame = frame.copy()
+        latest_detections = detections
+        latest_candidate_detections = candidate_detections
+        latest_proposal_detections = proposal_detections
+        latest_description = description
+        latest_timestamp = inference_timestamp
+        latest_source_frame_stamp_ns = source_frame_stamp_ns
+        camera_running = True
+        last_error = None
 
 
 def _detection_from_box(result, box, width, height):
@@ -366,12 +413,6 @@ def run_yolo(frame, return_candidates=False, return_proposals=False):
 
 
 def camera_loop():
-    global latest_frame
-    global latest_detections
-    global latest_candidate_detections
-    global latest_proposal_detections
-    global latest_description
-    global latest_timestamp
     global camera_running
     global last_error
 
@@ -385,6 +426,10 @@ def camera_loop():
                 headers={"Cache-Control": "no-cache"},
             )
             response.raise_for_status()
+
+            source_frame_stamp_ns = source_frame_stamp_ns_from_headers(
+                response.headers
+            )
 
             image_data = np.frombuffer(
                 response.content,
@@ -414,15 +459,17 @@ def camera_loop():
             )
             timestamp = now_iso()
 
-            with lock:
-                latest_frame = frame.copy()
-                latest_detections = detections
-                latest_candidate_detections = candidate_detections
-                latest_proposal_detections = proposal_detections
-                latest_description = description
-                latest_timestamp = timestamp
-                camera_running = True
-                last_error = None
+            # source_frame_stamp_ns was captured from this response before
+            # inference; publish it with that result, not a later frame.
+            _publish_inference_result(
+                frame,
+                detections,
+                candidate_detections,
+                proposal_detections,
+                description,
+                timestamp,
+                source_frame_stamp_ns,
+            )
 
         except Exception as exc:
             with lock:
@@ -478,6 +525,7 @@ def detections_latest():
     with lock:
         return {
             "timestamp": latest_timestamp,
+            "source_frame_stamp_ns": latest_source_frame_stamp_ns,
             "detections": list(latest_detections),
             "description": latest_description,
             "camera_running": camera_running,
@@ -497,6 +545,7 @@ def detections_target_latest(label: str):
             == normalized_label
         ]
         timestamp = latest_timestamp
+        source_frame_stamp_ns = latest_source_frame_stamp_ns
         running = camera_running
         error = last_error
 
@@ -506,6 +555,7 @@ def detections_target_latest(label: str):
     )
     return {
         "timestamp": timestamp,
+        "source_frame_stamp_ns": source_frame_stamp_ns,
         "label": label,
         "found": bool(detections),
         "best_detection": detections[0] if detections else None,
@@ -524,6 +574,7 @@ def detections_candidates_latest():
             for detection in latest_proposal_detections
         ]
         timestamp = latest_timestamp
+        source_frame_stamp_ns = latest_source_frame_stamp_ns
         running = camera_running
         error = last_error
         frame = latest_frame
@@ -532,6 +583,7 @@ def detections_candidates_latest():
     image_width = int(frame.shape[1]) if frame is not None else None
     return {
         "timestamp": timestamp,
+        "source_frame_stamp_ns": source_frame_stamp_ns,
         "detections": detections,
         "camera_running": running,
         "camera_url": CAMERA_URL,

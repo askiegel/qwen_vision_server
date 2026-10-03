@@ -127,6 +127,7 @@ def main():
         server.latest_proposal_detections = proposals
         server.latest_frame = frame
         server.latest_timestamp = "proposal-time"
+        server.latest_source_frame_stamp_ns = 123456789
         server.camera_running = True
         server.last_error = None
     proposal_response = server.detections_candidates_latest()
@@ -134,9 +135,10 @@ def main():
     assert proposal_response["image_width"] == 640
     assert proposal_response["image_height"] == 480
     assert set(proposal_response) == {
-        "timestamp", "detections", "camera_running", "camera_url",
+        "timestamp", "source_frame_stamp_ns", "detections", "camera_running", "camera_url",
         "last_error", "image_width", "image_height",
     }
+    assert proposal_response["source_frame_stamp_ns"] == 123456789
     chair_target_response = server.detections_target_latest("chair")
     assert chair_target_response["found"] is False
     print("PASS: class-agnostic proposal endpoint preserves low-confidence geometry.")
